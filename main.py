@@ -1,11 +1,8 @@
 import os
 import torch
 import pandas as pd
-import tkinter as tk
-from tkinter import filedialog
 from PIL import Image
 from tqdm import tqdm
-
 from transformers import (
     AutoModel,
     AutoProcessor,
@@ -14,55 +11,18 @@ from transformers import (
 )
 
 # ==========================================
-# 🛠️ SETUP & GUI INPUT
+# ⚙️ PATH SETUP (AUTO)
 # ==========================================
-def select_folder():
-    print("📂 Opening Folder Selector...")
-    root = tk.Tk()
-    root.withdraw()
-    folder_path = filedialog.askdirectory(title="Select Image Folder for Processing")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+IMAGE_DIR = os.path.join(BASE_DIR, "images")
 
-    if not folder_path:
-        print("❌ Operation Cancelled")
-        exit()
-
-    print(f"✅ Folder Selected: {folder_path}")
-    return folder_path
-
+if not os.path.exists(IMAGE_DIR):
+    print("❌ 'images' folder nahi mila.")
+    print("👉 main.py ke saath 'images' folder create karo aur images daalo.")
+    exit()
 
 # ==========================================
-# 🚀 MODEL LOADING
-# ==========================================
-def load_models():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"\n🖥️ Device: {torch.cuda.get_device_name(0) if device=='cuda' else 'CPU'}")
-
-    # --- SigLIP ---
-    print("[1/2] Loading SigLIP (Categorization)...")
-    siglip_proc = AutoProcessor.from_pretrained(
-        "google/siglip-so400m-patch14-384"
-    )
-    siglip_model = AutoModel.from_pretrained(
-        "google/siglip-so400m-patch14-384"
-    ).to(device)
-
-    # --- InstructBLIP ---
-    print("[2/2] Loading InstructBLIP (Metadata)...")
-    blip_proc = InstructBlipProcessor.from_pretrained(
-        "Salesforce/instructblip-flan-t5-xl"
-    )
-    blip_model = InstructBlipForConditionalGeneration.from_pretrained(
-        "Salesforce/instructblip-flan-t5-xl",
-        torch_dtype=torch.float16,
-        device_map="auto"
-    )
-
-    print("✅ Models Loaded Successfully\n")
-    return device, siglip_proc, siglip_model, blip_proc, blip_model
-
-
-# ==========================================
-# 📂 TAXONOMY
+# 🧠 TAXONOMY
 # ==========================================
 TAXONOMY = {
     "Backgrounds": ["Abstract Pattern", "Texture", "Gradient Colors", "Bokeh Blur", "Geometric Shapes"],
@@ -73,96 +33,110 @@ TAXONOMY = {
     "Nature": ["Forest & Trees", "Sky & Clouds", "Flowers & Garden", "Desert & Sand", "Waterfalls & Rivers"],
     "Medical": ["Doctor & Nurse", "Hospital Bed", "Pills & Medicine", "Microscope & Lab", "Surgery"],
     "Food": ["Fresh Fruits", "Fast Food", "Desserts & Cakes", "Coffee & Drinks", "Healthy Salad"],
-    "Sci-Fi & Fantasy": ["Space & Galaxy", "Cyberpunk & Futuristic", "Surrealism & Dreamlike", "3D Render & Hyper-realism", "Aliens & Robots"],
-    "Animals & Wildlife": ["Pets", "Wild Animals", "Birds & Aerial", "Marine Life", "Insects", "Farm Animals"]
+    "Sci-Fi & Fantasy": ["Space & Galaxy", "Cyberpunk & Futuristic", "Surrealism", "3D Render", "Aliens & Robots"],
+    "Animals & Wildlife": ["Pets", "Wild Animals", "Birds", "Marine Life", "Insects", "Farm Animals"]
 }
 
+# ==========================================
+# 🚀 MODEL LOADING
+# ==========================================
+def load_models():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"🖥️ Device: {torch.cuda.get_device_name(0) if device=='cuda' else 'CPU'}")
+
+    print("🔹 Loading SigLIP...")
+    siglip_proc = AutoProcessor.from_pretrained("google/siglip-so400m-patch14-384")
+    siglip_model = AutoModel.from_pretrained(
+        "google/siglip-so400m-patch14-384"
+    ).to(device)
+
+    print("🔹 Loading InstructBLIP...")
+    blip_proc = InstructBlipProcessor.from_pretrained(
+        "Salesforce/instructblip-flan-t5-xl"
+    )
+    blip_model = InstructBlipForConditionalGeneration.from_pretrained(
+        "Salesforce/instructblip-flan-t5-xl",
+        torch_dtype=torch.float16,
+        device_map="auto"
+    )
+
+    print("✅ Models loaded\n")
+    return device, siglip_proc, siglip_model, blip_proc, blip_model
 
 # ==========================================
 # 🧠 IMAGE PROCESSING
 # ==========================================
-def process_single_image(img_path, device, s_proc, s_model, b_proc, b_model):
+def process_image(img_path, device, s_proc, s_model, b_proc, b_model):
     try:
         image = Image.open(img_path).convert("RGB")
     except:
         return None
 
-    # -------- SigLIP Category --------
+    # ---- CATEGORY (SigLIP) ----
     main_keys = list(TAXONOMY.keys())
     inputs = s_proc(text=main_keys, images=image, return_tensors="pt", padding=True).to(device)
 
     with torch.no_grad():
-        outputs = s_model(**inputs)
+        out = s_model(**inputs)
 
-    main_idx = outputs.logits_per_image.argmax().item()
+    main_idx = torch.sigmoid(out.logits_per_image).argmax().item()
     main_cat = main_keys[main_idx]
 
     sub_keys = TAXONOMY[main_cat]
     inputs_sub = s_proc(text=sub_keys, images=image, return_tensors="pt", padding=True).to(device)
 
     with torch.no_grad():
-        outputs_sub = s_model(**inputs_sub)
+        out_sub = s_model(**inputs_sub)
 
-    sub_idx = outputs_sub.logits_per_image.argmax().item()
+    sub_idx = torch.sigmoid(out_sub.logits_per_image).argmax().item()
     sub_cat = sub_keys[sub_idx]
 
-    # -------- InstructBLIP Metadata --------
-    prompt = (
-        "Describe this image clearly. "
-        "Mention style, concept, main elements and mood. "
-        "Do not guess objects that are not visible."
-    )
-
+    # ---- DESCRIPTION (InstructBLIP) ----
+    prompt = "Describe the image in detail including objects, style, lighting and mood."
     inputs_blip = b_proc(images=image, text=prompt, return_tensors="pt").to(device, torch.float16)
 
     with torch.no_grad():
-        out = b_model.generate(**inputs_blip, max_new_tokens=120)
+        gen = b_model.generate(**inputs_blip, max_new_tokens=90)
 
-    description = b_proc.batch_decode(out, skip_special_tokens=True)[0].strip()
+    caption = b_proc.batch_decode(gen, skip_special_tokens=True)[0]
 
-    # Simple keyword extraction
-    ignore = {"image", "photo", "picture", "background", "scene"}
-    tags = sorted(
-        set(
-            w.strip(".,").lower()
-            for w in description.split()
-            if len(w) > 3 and w.lower() not in ignore
-        )
-    )
+    keywords = list(set([
+        w.strip(".,").lower()
+        for w in caption.split()
+        if len(w) > 4
+    ]))
 
     return {
         "Filename": os.path.basename(img_path),
         "Main Category": main_cat,
         "Sub Category": sub_cat,
-        "Description": description,
-        "Keywords": ", ".join(tags)
+        "Description": caption,
+        "Keywords": ", ".join(keywords)
     }
-
 
 # ==========================================
 # ▶️ MAIN
 # ==========================================
 if __name__ == "__main__":
-    folder = select_folder()
     device, s_proc, s_model, b_proc, b_model = load_models()
 
     images = [
-        os.path.join(folder, f)
-        for f in os.listdir(folder)
+        os.path.join(IMAGE_DIR, f)
+        for f in os.listdir(IMAGE_DIR)
         if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
     ]
 
-    print(f"📸 {len(images)} images found\n")
+    print(f"📸 Found {len(images)} images\n")
 
     results = []
-    for img in tqdm(images, desc="Processing", unit="img"):
-        data = process_single_image(img, device, s_proc, s_model, b_proc, b_model)
+    for img in tqdm(images, desc="Processing Images", unit="img"):
+        data = process_image(img, device, s_proc, s_model, b_proc, b_model)
         if data:
             results.append(data)
 
     if results:
-        out_csv = os.path.join(folder, "metadata_results.csv")
+        out_csv = os.path.join(BASE_DIR, "metadata_results.csv")
         pd.DataFrame(results).to_csv(out_csv, index=False, encoding="utf-8")
-        print(f"\n✅ DONE → {out_csv}")
+        print(f"\n✅ DONE! CSV saved at:\n{out_csv}")
     else:
-        print("\n⚠️ No results generated")
+        print("⚠️ No data generated.")
