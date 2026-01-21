@@ -1,6 +1,5 @@
 import os
 import torch
-import pandas as pd
 from PIL import Image
 from tqdm import tqdm
 from transformers import (
@@ -11,14 +10,14 @@ from transformers import (
 )
 
 # ==========================================
-# ⚙️ PATH SETUP (AUTO)
+# 📂 PATH SETUP
 # ==========================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_DIR = os.path.join(BASE_DIR, "images")
+OUTPUT_HTML = os.path.join(BASE_DIR, "metadata_results.html")
 
 if not os.path.exists(IMAGE_DIR):
-    print("❌ 'images' folder nahi mila.")
-    print("👉 main.py ke saath 'images' folder create karo aur images daalo.")
+    print("❌ 'images' folder not found next to main.py")
     exit()
 
 # ==========================================
@@ -38,11 +37,11 @@ TAXONOMY = {
 }
 
 # ==========================================
-# 🚀 MODEL LOADING
+# 🚀 LOAD MODELS
 # ==========================================
 def load_models():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"🖥️ Device: {torch.cuda.get_device_name(0) if device=='cuda' else 'CPU'}")
+    print(f"🖥️ Device: {torch.cuda.get_device_name(0) if device == 'cuda' else 'CPU'}")
 
     print("🔹 Loading SigLIP...")
     siglip_proc = AutoProcessor.from_pretrained("google/siglip-so400m-patch14-384")
@@ -79,8 +78,7 @@ def process_image(img_path, device, s_proc, s_model, b_proc, b_model):
     with torch.no_grad():
         out = s_model(**inputs)
 
-    main_idx = torch.sigmoid(out.logits_per_image).argmax().item()
-    main_cat = main_keys[main_idx]
+    main_cat = main_keys[torch.sigmoid(out.logits_per_image).argmax().item()]
 
     sub_keys = TAXONOMY[main_cat]
     inputs_sub = s_proc(text=sub_keys, images=image, return_tensors="pt", padding=True).to(device)
@@ -88,8 +86,7 @@ def process_image(img_path, device, s_proc, s_model, b_proc, b_model):
     with torch.no_grad():
         out_sub = s_model(**inputs_sub)
 
-    sub_idx = torch.sigmoid(out_sub.logits_per_image).argmax().item()
-    sub_cat = sub_keys[sub_idx]
+    sub_cat = sub_keys[torch.sigmoid(out_sub.logits_per_image).argmax().item()]
 
     # ---- DESCRIPTION (InstructBLIP) ----
     prompt = "Describe the image in detail including objects, style, lighting and mood."
@@ -100,19 +97,69 @@ def process_image(img_path, device, s_proc, s_model, b_proc, b_model):
 
     caption = b_proc.batch_decode(gen, skip_special_tokens=True)[0]
 
-    keywords = list(set([
+    keywords = ", ".join(sorted(set([
         w.strip(".,").lower()
         for w in caption.split()
         if len(w) > 4
-    ]))
+    ])))
 
     return {
-        "Filename": os.path.basename(img_path),
-        "Main Category": main_cat,
-        "Sub Category": sub_cat,
-        "Description": caption,
-        "Keywords": ", ".join(keywords)
+        "filename": os.path.basename(img_path),
+        "image_path": f"images/{os.path.basename(img_path)}",
+        "main_cat": main_cat,
+        "sub_cat": sub_cat,
+        "caption": caption,
+        "keywords": keywords
     }
+
+# ==========================================
+# 🧾 HTML GENERATOR
+# ==========================================
+def generate_html(results):
+    rows = ""
+    for r in results:
+        rows += f"""
+        <tr>
+            <td><img src="{r['image_path']}" width="120"></td>
+            <td>{r['main_cat']}</td>
+            <td>{r['sub_cat']}</td>
+            <td>{r['caption']}</td>
+            <td>{r['keywords']}</td>
+        </tr>
+        """
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Image Metadata Results</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; background:#f5f5f5; }}
+            table {{ border-collapse: collapse; width: 100%; background:white; }}
+            th, td {{ border: 1px solid #ddd; padding: 10px; vertical-align: top; }}
+            th {{ background: #222; color: white; }}
+            img {{ border-radius: 6px; }}
+        </style>
+    </head>
+    <body>
+        <h2>📸 Image Metadata Results</h2>
+        <table>
+            <tr>
+                <th>Image</th>
+                <th>Main Category</th>
+                <th>Sub Category</th>
+                <th>Description</th>
+                <th>Keywords</th>
+            </tr>
+            {rows}
+        </table>
+    </body>
+    </html>
+    """
+
+    with open(OUTPUT_HTML, "w", encoding="utf-8") as f:
+        f.write(html)
 
 # ==========================================
 # ▶️ MAIN
@@ -129,14 +176,13 @@ if __name__ == "__main__":
     print(f"📸 Found {len(images)} images\n")
 
     results = []
-    for img in tqdm(images, desc="Processing Images", unit="img"):
+    for img in tqdm(images, desc="Processing Images"):
         data = process_image(img, device, s_proc, s_model, b_proc, b_model)
         if data:
             results.append(data)
 
     if results:
-        out_csv = os.path.join(BASE_DIR, "metadata_results.csv")
-        pd.DataFrame(results).to_csv(out_csv, index=False, encoding="utf-8")
-        print(f"\n✅ DONE! CSV saved at:\n{out_csv}")
+        generate_html(results)
+        print(f"\n✅ DONE! HTML file created:\n{OUTPUT_HTML}")
     else:
-        print("⚠️ No data generated.")
+        print("⚠️ No results generated.")
